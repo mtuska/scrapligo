@@ -1,9 +1,12 @@
 package transport
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
+	"time"
 
 	"github.com/scrapli/scrapligo/util"
 
@@ -50,16 +53,43 @@ type Standard struct {
 func (t *Standard) openSession(a *Args, cfg *ssh.ClientConfig) error {
 	var err error
 
-	t.client, err = ssh.Dial(
-		tcp,
-		fmt.Sprintf("%s:%d", a.Host, a.Port),
-		cfg,
-	)
+	var startTime time.Time
+	if cfg.Timeout > 0 {
+		startTime = time.Now()
+	}
+	conn, err := net.DialTimeout(tcp, fmt.Sprintf("%s:%d", a.Host, a.Port), cfg.Timeout)
 	if err != nil {
-		a.l.Criticalf("error creating crypto/ssh client, error: %s", err)
-
+		a.l.Criticalf("error creating crypto/ssh connection, error: %s", err)
 		return err
 	}
+
+	// We set a deadline as the ssh.Dial function itself can hang during the handshake
+	// This can happen for multiple reasons, but the simple gist is that the net.Dial succeeds
+	// But then during handshaking, the connection never actually gives us a response
+	// Or the response is not proper(SSH-* version string) and less then the max length(255)
+	if cfg.Timeout > 0 {
+		dialDuration := time.Since(startTime)
+		cfg.Timeout = cfg.Timeout - dialDuration
+		if cfg.Timeout < 0 {
+			err = errors.New("dial took longer than timeout")
+			a.l.Criticalf("error creating crypto/ssh connection, error: %s", err)
+			return err
+		}
+		if err := conn.SetDeadline(time.Now().Add(cfg.Timeout)); err != nil {
+			a.l.Criticalf("error creating crypto/ssh connection deadline, error: %s", err)
+			return err
+		}
+		defer func() {
+			conn.SetDeadline(time.Time{})
+		}()
+	}
+
+	c, chans, reqs, err := ssh.NewClientConn(conn, fmt.Sprintf("%s:%d", a.Host, a.Port), cfg)
+	if err != nil {
+		a.l.Criticalf("error creating crypto/ssh client, error: %s", err)
+		return err
+	}
+	t.client = ssh.NewClient(c, chans, reqs)
 
 	t.session, err = t.client.NewSession()
 	if err != nil {
