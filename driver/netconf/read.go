@@ -86,6 +86,17 @@ func (d *Driver) read() {
 					d.storeSubscriptionMessage(subID, b)
 				}
 
+				// RFC 5277 notifications carry no <subscription-id>
+				// and no message-id; they're unsolicited frames the
+				// server pushes after <create-subscription>. Route a
+				// copy of the bytes onto the notifications channel
+				// for consumers that called Driver.Notifications().
+				// Non-blocking on the channel keeps the read loop
+				// resilient to slow consumers.
+				if messageID == 0 && subID == 0 && bytes.Contains(b, []byte("<notification")) {
+					d.deliverNotification(b)
+				}
+
 				b = nil
 			}
 		}

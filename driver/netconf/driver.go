@@ -143,6 +143,13 @@ func NewDriver(
 		subscriptions:     map[int][][]byte{},
 		subscriptionsLock: &sync.Mutex{},
 
+		// notifications buffers unsolicited <notification> frames
+		// (RFC 5277). Sized at 256 to absorb event bursts on busy
+		// devices without back-pressuring the read loop; the read
+		// loop drops new frames (with a debug log) when full so a
+		// stalled consumer never deadlocks the session.
+		notifications: make(chan []byte, defaultNotificationsBufferSize),
+
 		errs: make(chan error),
 		done: make(chan bool),
 	}
@@ -201,9 +208,25 @@ type Driver struct {
 	subscriptions     map[int][][]byte
 	subscriptionsLock *sync.Mutex
 
+	// notifications carries RFC 5277 unsolicited <notification>
+	// frames captured by the read loop. Sub-id-keyed subscriptions
+	// (YANG-push, RFC 8641) still route through `subscriptions`;
+	// this channel is for the legacy/default stream where frames
+	// have no <subscription-id> element. Public access via
+	// Driver.Notifications().
+	notifications     chan []byte
+	notificationsOnce sync.Once
+
 	errs chan error
 	done chan bool
 }
+
+// defaultNotificationsBufferSize is the buffer depth for the RFC 5277
+// notification channel. Large enough to absorb a burst from a busy OLT
+// without blocking the read goroutine; the read loop drops new frames
+// (with a debug log) once full so a slow consumer never deadlocks the
+// session.
+const defaultNotificationsBufferSize = 256
 
 // Open opens the underlying generic.Driver, and by extension the channel.Channel and Transport
 // objects. This should be called prior to executing any RPC methods of the Driver.
